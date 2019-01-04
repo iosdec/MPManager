@@ -24,4 +24,12 @@
     self.printed            =   NO;
 }
 
+#pragma mark    -   Checker:
+
+- (BOOL)isValidJob {
+    if (!self.content) { return NO; }
+    if (!self.content.hasValidContent) { return NO; }
+    return YES;
+}
+
 @end
