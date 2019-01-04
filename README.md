@@ -67,7 +67,7 @@ Drag the MPManager folder into your project, then import this file where needed:
 ```
 
 </br>
-#### Usage:
+#### Usage:
 
 This class system is pretty straight forward.. that was the whole idea behind it.
 
