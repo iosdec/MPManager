@@ -38,4 +38,9 @@ typedef enum {
 */
 - (MPPrinterType)printerType;
 
+/*!
+ @brief Check if printer is valid.
+*/
+- (BOOL)isValidPrinter;
+
 @end
