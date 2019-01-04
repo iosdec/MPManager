@@ -12,8 +12,6 @@
 @interface MPManager() <UIPrintInteractionControllerDelegate, Epos2ScanDelegate, Epos2DiscoveryDelegate, Epos2ConnectionDelegate, Epos2PtrReceiveDelegate> {
     
     NSMutableArray *jobs;   //  jobs left to print.
-    int currentIndex;       //  current item to print.
-    BOOL printingStack;     //  whether we're printing stack.
     
 }
 @end
@@ -68,131 +66,129 @@
 
 - (void)printAllJobs:(void (^)(void))completion {
     
-    //  in this method.. we need to make sure that each job is completed
-    //  before starting another one.
-    //  so once we've called "printJob".. we then need to pull the
-    //  next job and print that..
+    //  first, check for the delegate method:
+    if (completion) {
+        [self setPrintAllCompletion:completion];
+    }
     
+    //  check if we have valid jobs:
+    if (!self->jobs) {
+        if (completion) { completion(); return; }
+    }
     if (self->jobs.count == 0) {
-        if (completion) { completion(); } return;
+        if (completion) { completion(); return; }
     }
     
-    //  update values:
-    self->printingStack     =   YES;
-    self->currentIndex      =   0;
-    [self setPrintAllCompletion:completion];
+    //  instead of running through a loop (because that would
+    //  defeat the point of waiting for the alert to be dimsissed)..
+    //  we need to start the next job ONLY after the active job
+    //  is finished. To do this.. we need a repeater function that
+    //  checks for a next job in the queue until all jobs are done.
+    //  And because we've got a completion as a property, we can
+    //  check for that in the check method and call if needed.
+    //  So first.. let's attempt to print the first job:
     
-    //  get the first item in the stack:
-    MPManagerJob *job       =   [self->jobs objectAtIndex:0];
+    MPManagerJob *primary   =   [self primaryJob];
     
-    //  now print the item.. the printJob method
-    //  will automaticall check the index
-    //  of the next object.. because we have printintStack set to YES.
-    [self printJob:job completion:nil];
+    [self printJob:primary completion:^(BOOL printed, NSString *error) {
+        
+        //  update job information:
+        [primary setProcessed:YES];
+        [primary setPrinted:printed];
+        [primary setError:error];
+        
+        //  now check for the next job:
+        [self checkForNextJobWithPrevious:primary];
+        
+    }];
     
 }
 
-#pragma mark    -   Print:
-
-- (void)updateInteractionControllerWithJob:(MPManagerJob *)job controller:(UIPrintInteractionController *)controller {
+- (void)checkForNextJobWithPrevious:(MPManagerJob *)job {
     
-    if (!job.printer) {
-        return;
+    //  this method gets called after a job has finished
+    //  processing. so what we want to do here, is check
+    //  if there's a job after this in the stack; if there
+    //  isn't.. then we'll call the completion method if
+    //  it exists.. because we've completed all jobs:
+    
+    if (!self.jobs) {
+        if (self.printAllCompletion) { self.printAllCompletion(); } return;
+    }
+    if (self.jobs.count == 0) {
+        if (self.printAllCompletion) { self.printAllCompletion(); } return;
     }
     
-    if (!job.printer.address) {
-        return;
-    }
+    NSUInteger previous_index   =   [self.jobs indexOfObject:job];
     
-    if (job.printer.address.length == 0) {
-        return;
-    }
-    
-    if (!job.content) {
-        return;
-    }
-    
-    UIPrintInfo *info       =   [UIPrintInfo printInfo];
-    info.outputType         =   UIPrintInfoOutputGrayscale;
-    info.duplex             =   UIPrintInfoDuplexNone;
-    info.orientation        =   UIPrintInfoOrientationPortrait;
-    info.jobName            =   @"Airprint Job";
-    
-    UIPrintInteractionController *printController   =   [UIPrintInteractionController sharedPrintController];
-    printController.printInfo                       =   info;
-    printController.delegate                        =   self;
-    printController.printingItem                    =   nil;
-    printController.printingItems                   =   nil;
-    printController.printPageRenderer               =   nil;
-    
-    //  check if the job content is a valid print item:
-    if (job.content.image) {
-        printController.printingItem = job.content.image;
-    }
-    if (job.content.url) {
-        printController.printingItem = [NSData dataWithContentsOfURL:job.content.url];
-    }
-    
-    //  now check if we're printing a string:
-    if (job.content.string || job.content.mutableString || job.content.htmlString) {
+    if (previous_index + 1 > (self->jobs.count - 1)) {
         
-        printController.printingItem                =   nil;
-        
-        //  create a renderer:
-        if (job.content.string) {
-            UISimpleTextPrintFormatter *formatter   =   [self textFormatterWithString:job.content.string];
-            printController.printFormatter          =   formatter;
-        }
-        if (job.content.mutableString) {
-            UISimpleTextPrintFormatter *formatter   =   [self textFormatterWithString:job.content.mutableString];
-            printController.printFormatter          =   formatter;
-        }
-        if (job.content.htmlString) {
-            UIMarkupTextPrintFormatter *formatter   =   [[UIMarkupTextPrintFormatter alloc] initWithMarkupText:job.content.htmlString];
-            printController.printFormatter          =   formatter;
-        }
+        //  this must mean that we've reached the end
+        //  of the stack.
+        if (self.printAllCompletion) {
+            self.printAllCompletion();
+        } return;
         
     }
+    
+    //  now find the next job:
+    MPManagerJob *next_job      =   [self.jobs objectAtIndex:previous_index + 1];
+    
+    //  and print it:
+    [self printJob:next_job completion:^(BOOL printed, NSString *error) {
+        
+        //  update job info:
+        [next_job setProcessed:YES];
+        [next_job setPrinted:printed];
+        [next_job setError:error];
+        
+        //  now check for the next one:
+        [self checkForNextJobWithPrevious:next_job];
+        
+    }];
     
 }
 
-- (void)printJob:(MPManagerJob *)job completion:(void(^)(BOOL printed, NSString *error))completion {
+#pragma mark    -   Print Job:
+
+- (void)printJob:(MPManagerJob *)job completion:(void (^)(BOOL, NSString *))completion {
     
-    //  check for requirements:
+    //  first, let's check if we have a job:
+    if (!job) {
+        if (completion) { completion(NO, @"Missing job"); return; }
+    }
     
+    //  now.. check if printer is missing:
     if (!job.printer) {
-        if (completion) {
-            completion(NO, @"Invalid printer");
-        } return;
+        if (completion) { completion(NO, @"Missing printer"); return; }
     }
     
-    if (!job.printer.address) {
-        if (completion) {
-            completion(NO, @"Invalid printer address");
-        } return;
+    //  check if printer is valid:
+    if (!job.printer.isValidPrinter) {
+        if (completion) { completion(NO, @"Printer is invalid"); return; }
     }
     
-    if (job.printer.address.length == 0) {
-        if (completion) {
-            completion(NO, @"Invalid printer address");
-        } return;
-    }
-    
+    //  check missing content:
     if (!job.content) {
-        if (completion) {
-            completion(NO, @"Invalid printer content");
-        } return;
+        if (completion) { completion(NO, @"Content is missing"); return; }
     }
+    
+    //  check content valid:
+    if (!job.content.hasValidContent) {
+        if (completion) { completion(NO, @"Content is invalid"); return; }
+    }
+    
+    //  -------------------------------------------------------------------
     
     //  AIRPRINT.
     if (job.printer.printerType == MPPrinterTypeAirprint) {
         
-        UIPrinter *printer      =   [UIPrinter printerWithURL:[NSURL URLWithString:job.printer.address]];
-        UIPrintInfo *info       =   [UIPrintInfo printInfo];
-        info.outputType         =   UIPrintInfoOutputGrayscale;
-        info.duplex             =   UIPrintInfoDuplexNone;
-        info.orientation        =   UIPrintInfoOrientationPortrait;
-        info.jobName            =   @"Airprint Job";
+        UIPrinter *printer                              =   [UIPrinter printerWithURL:[NSURL URLWithString:job.printer.address]];
+        UIPrintInfo *info                               =   [UIPrintInfo printInfo];
+        info.outputType                                 =   UIPrintInfoOutputGrayscale;
+        info.duplex                                     =   UIPrintInfoDuplexNone;
+        info.orientation                                =   UIPrintInfoOrientationPortrait;
+        info.jobName                                    =   @"Airprint - Superb | iOS";
         
         UIPrintInteractionController *printController   =   [UIPrintInteractionController sharedPrintController];
         printController.printInfo                       =   info;
@@ -201,7 +197,6 @@
         printController.printingItems                   =   nil;
         printController.printPageRenderer               =   nil;
         
-        //  check if the job content is a valid print item:
         if (job.content.image) {
             printController.printingItem = job.content.image;
         }
@@ -209,12 +204,10 @@
             printController.printingItem = [NSData dataWithContentsOfURL:job.content.url];
         }
         
-        //  now check if we're printing a string:
         if (job.content.string || job.content.mutableString || job.content.htmlString) {
             
             printController.printingItem                =   nil;
             
-            //  create a renderer:
             if (job.content.string) {
                 UISimpleTextPrintFormatter *formatter   =   [self textFormatterWithString:job.content.string];
                 printController.printFormatter          =   formatter;
@@ -230,79 +223,35 @@
             
         }
         
-        //  print it:
+        //  now let's print:
         [printController printToPrinter:printer completionHandler:^(UIPrintInteractionController * _Nonnull printInteractionController, BOOL completed, NSError * _Nullable error) {
             
-            //  FIX.
-            //  Here is where we need to check for the next job.
-            //  without calling printToPrinter again.
-            //  So first.. we need to check if the user
-            //  is printing from printStack.
+            //  previously.. we had a function in here that would
+            //  check for the next job in the cycle.. that's been removed
+            //  due to being able to print in singular.
+            //  all cycle methods should be called from a super function.
+            //  instead.. what we will do, is call the completion method when
+            //  the alert is off the screen.
             
-            if (self->printingStack) {
-                
-                //  so let's check our index stuff:
-                if (self->jobs.count == 0) {
-                    if (self.printAllCompletion) {
-                        self.printAllCompletion();
-                    } return;
-                }
-                
-                //  now check the index range:
-                if ((self->currentIndex + 1) > (self->jobs.count - 1)) {
-                    if (self.printAllCompletion) {
-                        self.printAllCompletion();
-                    } return;
-                }
-                
-                //  let's get the next job:
-                self->currentIndex  =   self->currentIndex + 1;
-                MPManagerJob *job   =   [self->jobs objectAtIndex:self->currentIndex];
-                
-                //  first.. let's check if the alert
-                //  is still visible:
-                if ([self isPrintingAlertActive]) {
-                    [self performSelector:@selector(reattemptPrint:) withObject:job afterDelay:2.0];
-                    return;
-                }
-                
-                //  now.. print the next job:
-                [self printJob:job completion:nil];
-                return;
-                
-            }
-            
-            if (error) {
-                NSLog(@"printInteractionController failed with error: %@", error);
-            }
-            
-            if (completion) {
-                completion(completed, error.localizedDescription);
-            }
+            [self handleAirPrintCompletion:completion];
+            return;
             
         }];
         
     }
     
-    //  BLUETOOTH:
+    //  BLUETOOTH.
     if (job.printer.printerType == MPPrinterTypeBluetooth) {
         
-        //  in the future we'll add more support for different printers.
-        //  for now.. we're focusing on EPOS.
-        //  for this, we need to have mutable content set.
-        
         if (!job.content.mutableString) {
-            if (completion) {
-                completion(NO, @"EPOS Mutable content needs to be set");
-            } return;
+            if (completion) { completion(NO, @"EPOS Mutable content needs to be set"); } return;
         }
         
         //  now, create an epos2printer.
         Epos2Printer *epos2printer  =   [self eposPrinterWithAddress:job.printer.address];
+        
         if (!epos2printer) {
-            if (completion) {
-                completion(NO, @"EPOS Printer is offline");
-            } return;
+            if (completion) { completion(NO, @"EPOS Printer is offline"); } return;
         }
         
         //  prepare printer:
@@ -325,56 +274,85 @@
                           compress:EPOS2_COMPRESS_AUTO];
         }
         
-        //  add feed line:
+        //  add printing content / options:
         [epos2printer addFeedLine:1];
-        
-        //  add content:
         [epos2printer addText:job.content.mutableString];
-        
-        //  add feed line before cut:
         [epos2printer addFeedLine:1];
-        
-        //  cut the feed:
         [epos2printer addCut:EPOS2_CUT_FEED];
         
-        //  get status of printer:
+        //  check online status:
         Epos2PrinterStatusInfo *info        =   [epos2printer getStatus];
         NSString *infoError                 =   [self makeErrorMessage:info];
         
         if (![self isPrintable:info]) {
-            if (completion) {
-                completion(NO, @"Printer not available");
-            } return;
+            if (infoError && infoError.length != 0) {
+                if (completion) { completion(NO, infoError); } return;
+            } else {
+                if (completion) { completion(NO, @"Printer not available"); } return;
+            }
         }
         
         if (infoError.length != 0) {
-            if (completion) {
-                completion(NO, infoError);
-            } return;
+            if (completion) { completion(NO, infoError); } return;
         }
         
         int print_result                    =   [epos2printer sendData:EPOS2_PARAM_DEFAULT];
         
-        if (print_result == 0) {
-            if (completion) { completion(YES, nil); }
-        } else {
-            if (completion) { completion(NO, @"Failed to print"); }
-        }
-        
+        //  before calling any completion methods,
+        //  let's finish the job for the printer:
         [epos2printer clearCommandBuffer];
         [epos2printer endTransaction];
+        
+        //  check for a bad result:
+        if (print_result != 0) {
+            if (completion) { completion(NO, @"Failed to print"); return; }
+        }
+        
+        //  if we got to here.. the job was successful.
+        //  so lets call the completion method:
+        if (completion) {
+            completion(YES, nil);
+        }
         
     }
     
 }
 
-- (void)reattemptPrint:(MPManagerJob *)job {
+#pragma mark    -   Alert Checker:
+
+- (void)handleAirPrintCompletion:(void(^)(BOOL printed, NSString *error))completion {
     
-    //  this method will attempt to call the print method again:
-    //  it's another hacky/quick method seeing as we can't call
-    //  performSelector with multiple objects.
-    [self printJob:job completion:nil];
+    //  the purpose of this method, is to keep checking if an alert
+    //  is visible on screen, if so.. then repeat the method.. if not
+    //  then the job is ACTUALLY completed.
     
+    if ([self isPrintingAlertActive]) {
+        [self performSelector:@selector(handleAirPrintCompletion:) withObject:completion afterDelay:1]; return;
+    }
+    
+    //  if we got to here.. that means the alert has dissapeared,
+    //  and we can call the completion method:
+    
+    if (completion) {
+        completion(YES, nil);
+    }
+    
+}
+
+#pragma mark    -   Checkers and getters:
+
+- (BOOL)hasPrimaryJob {
+    if (!self->jobs) { return NO; }
+    if (self->jobs.count == 0) { return NO; }
+    return YES;
+}
+
+- (MPManagerJob *)primaryJob {
+    if (![self hasPrimaryJob]) {
+        return nil;
+    } else {
+        return [self->jobs firstObject];
+    }
 }
 
 #pragma mark    -   Hacky Delegate:
@@ -427,7 +405,6 @@
     NSLog(@"Print interaction controller will present printer options");
     
 }
-
 
 
 #pragma mark    -   UIPrinter Formatter:
@@ -487,54 +464,48 @@
 
 - (NSString *)makeErrorMessage:(Epos2PrinterStatusInfo *)status {
     
-    NSMutableString *errMsg = [[NSMutableString alloc] initWithString:@""];
-    
     if (status.getOnline == EPOS2_FALSE) {
-        [errMsg appendString:NSLocalizedString(@"err_offline", @"")];
+        return @"Printer is offline";
     }
     if (status.getConnection == EPOS2_FALSE) {
-        [errMsg appendString:NSLocalizedString(@"err_no_response", @"")];
+        return @"No response";
     }
     if (status.getCoverOpen == EPOS2_TRUE) {
-        [errMsg appendString:NSLocalizedString(@"err_cover_open", @"")];
+        return @"Cover is open";
     }
     if (status.getPaper == EPOS2_PAPER_EMPTY) {
-        [errMsg appendString:NSLocalizedString(@"err_receipt_end", @"")];
+        return @"No paper";
     }
     if (status.getPaperFeed == EPOS2_TRUE || status.getPanelSwitch == EPOS2_SWITCH_ON) {
-        [errMsg appendString:NSLocalizedString(@"err_paper_feed", @"")];
+        return @"Error.. Paper feed";
     }
     if (status.getErrorStatus == EPOS2_MECHANICAL_ERR || status.getErrorStatus == EPOS2_AUTOCUTTER_ERR) {
-        [errMsg appendString:NSLocalizedString(@"err_autocutter", @"")];
-        [errMsg appendString:NSLocalizedString(@"err_need_recover", @"")];
+        return @"Cutter / Mechanical error";
     }
     if (status.getErrorStatus == EPOS2_UNRECOVER_ERR) {
-        [errMsg appendString:NSLocalizedString(@"err_unrecover", @"")];
+        return @"Unrecover";
     }
     
     if (status.getErrorStatus == EPOS2_AUTORECOVER_ERR) {
         if (status.getAutoRecoverError == EPOS2_HEAD_OVERHEAT) {
-            [errMsg appendString:NSLocalizedString(@"err_overheat", @"")];
-            [errMsg appendString:NSLocalizedString(@"err_head", @"")];
+            return @"Head / Overheat";
         }
         if (status.getAutoRecoverError == EPOS2_MOTOR_OVERHEAT) {
-            [errMsg appendString:NSLocalizedString(@"err_overheat", @"")];
-            [errMsg appendString:NSLocalizedString(@"err_motor", @"")];
+            return @"Motor / Overheat";
         }
         if (status.getAutoRecoverError == EPOS2_BATTERY_OVERHEAT) {
-            [errMsg appendString:NSLocalizedString(@"err_overheat", @"")];
-            [errMsg appendString:NSLocalizedString(@"err_battery", @"")];
+            return @"Battery / Overheat";
         }
         if (status.getAutoRecoverError == EPOS2_WRONG_PAPER) {
-            [errMsg appendString:NSLocalizedString(@"err_wrong_paper", @"")];
+            return @"Wrong paper";
         }
     }
     
     if (status.getBatteryLevel == EPOS2_BATTERY_LEVEL_0) {
-        [errMsg appendString:NSLocalizedString(@"err_battery_real_end", @"")];
+        return @"Battery empty";
     }
     
-    return errMsg;
+    return @"";
     
 }
 
@@ -555,6 +526,8 @@
 #pragma mark    -   Getters:
 
 - (NSArray *)jobs {
+    if (!self->jobs) { return [NSArray array]; }
+    if (self->jobs.count == 0) { return [NSArray array]; }
     return self->jobs;
 }
 
