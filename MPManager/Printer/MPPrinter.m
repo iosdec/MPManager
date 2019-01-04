@@ -114,5 +114,13 @@
     
 }
 
+#pragma mark    -   Check Valid:
+
+- (BOOL)isValidPrinter {
+    if (!self.address) { return NO; }
+    if (self.address.length == 0) { return NO; }
+    return YES;
+}
+
 
 @end
