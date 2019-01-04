@@ -13,6 +13,13 @@
 */
 @interface MPContent : NSObject
 
+- (id)init;
+
+/*!
+ @brief Check if MPContent is valid.
+*/
+- (BOOL)hasValidContent;
+
 /*!
  @brief Standard string to print.
 */
