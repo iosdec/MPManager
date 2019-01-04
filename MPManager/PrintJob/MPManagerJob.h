@@ -18,6 +18,11 @@
 - (id)init;
 
 /*!
+ @brief Check if job is valid.
+*/
+- (BOOL)isValidJob;
+
+/*!
  @brief Printer associated for the job.
 */
 @property (strong, nonatomic) MPPrinter *printer;
